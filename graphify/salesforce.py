@@ -4,6 +4,7 @@
 # plus path-aware rules for bundle layouts (lwc/, aura/, force-app/main/default/).
 from __future__ import annotations
 
+import importlib
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -127,6 +128,13 @@ _LWC_APEX_IMPORT_RE = re.compile(r"@salesforce/apex/(\w+)\.(\w+)")
 _LWC_SCHEMA_IMPORT_RE = re.compile(r"@salesforce/schema/(\w+)\.(\w+)")
 _LWC_C_TAG_RE = re.compile(r"<c-([\w-]+)")
 _LWC_LIGHTNING_TAG_RE = re.compile(r"<lightning-([\w-]+)")
+
+# Apex test markers — excluded from graph extraction (case-insensitive)
+_APEX_TEST_ANNOTATION_NAMES: frozenset[str] = frozenset({"istest", "testsetup"})
+_APEX_TEST_ANNOTATION_IN_TEXT_RE = re.compile(
+    r"@\s*(?:isTest|IsTest|TestSetup)\b",
+    re.IGNORECASE,
+)
 
 
 def is_salesforce_meta_xml(name: str) -> bool:
@@ -431,13 +439,155 @@ def extract_lwc_js_meta(path: Path) -> dict:
     return result
 
 
+def _apex_annotation_is_test(name: str) -> bool:
+    return name.casefold() in _APEX_TEST_ANNOTATION_NAMES
+
+
+def _apex_text_has_test_annotation(text: str) -> bool:
+    return bool(_APEX_TEST_ANNOTATION_IN_TEXT_RE.search(text))
+
+
+def _apex_find_class_body(node: Any) -> Any | None:
+    body = node.child_by_field_name("body")
+    if body is not None:
+        return body
+    for child in node.children:
+        if child.type in ("class_body", "interface_body"):
+            return child
+    return None
+
+
+def _apex_collect_test_exclusions(path: Path) -> tuple[bool, set[str]]:
+    """Return (skip_entire_file, node_ids_to_drop) for Apex test classes/methods."""
+    from graphify.extract import _java_method_annotation_names, _read_text
+
+    excluded: set[str] = set()
+    stem = _file_stem(path)
+
+    try:
+        mod = importlib.import_module("tree_sitter_java")
+        from tree_sitter import Language, Parser
+
+        language = Language(mod.language())
+        parser = Parser(language)
+        source = path.read_bytes()
+        root = parser.parse(source).root_node
+    except Exception:
+        return _apex_collect_test_exclusions_from_text(path)
+
+    all_class_nids: set[str] = set()
+    test_class_nids: set[str] = set()
+
+    def walk(
+        node: Any,
+        parent_class_nid: str | None,
+        inside_test_class: bool,
+    ) -> None:
+        t = node.type
+
+        if t in ("class_declaration", "interface_declaration"):
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                for child in node.children:
+                    if child.type == "identifier":
+                        name_node = child
+                        break
+            if name_node is None:
+                return
+            class_name = _read_text(name_node, source)
+            class_nid = _make_id(stem, class_name)
+            all_class_nids.add(class_nid)
+            annos = _java_method_annotation_names(node, source)
+            is_test_class = any(_apex_annotation_is_test(a) for a in annos)
+            if is_test_class:
+                test_class_nids.add(class_nid)
+                excluded.add(class_nid)
+            body = _apex_find_class_body(node)
+            if body is not None:
+                for child in body.children:
+                    walk(child, class_nid, is_test_class)
+            return
+
+        if t in ("method_declaration", "constructor_declaration") and parent_class_nid:
+            name_node = node.child_by_field_name("name")
+            func_name = _read_text(name_node, source) if name_node else None
+            if not func_name:
+                return
+            method_nid = _make_id(parent_class_nid, func_name)
+            if inside_test_class:
+                excluded.add(method_nid)
+                return
+            annos = _java_method_annotation_names(node, source)
+            if any(_apex_annotation_is_test(a) for a in annos):
+                excluded.add(method_nid)
+            return
+
+        for child in node.children:
+            walk(child, parent_class_nid, inside_test_class)
+
+    walk(root, None, False)
+    skip_file = bool(all_class_nids) and all_class_nids <= test_class_nids
+    return skip_file, excluded
+
+
+def _apex_collect_test_exclusions_from_text(path: Path) -> tuple[bool, set[str]]:
+    """Regex fallback when tree-sitter-java is unavailable or fails."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False, set()
+
+    stem = _file_stem(path)
+    all_class_names: list[str] = []
+    test_class_names: list[str] = []
+
+    for match in _APEX_CLASS_RE.finditer(text):
+        name = match.group(1)
+        all_class_names.append(name)
+        prefix = text[max(0, match.start() - 800): match.start()]
+        if _apex_text_has_test_annotation(prefix):
+            test_class_names.append(name)
+
+    excluded = {_make_id(stem, name) for name in test_class_names}
+    skip_file = bool(all_class_names) and len(test_class_names) == len(all_class_names)
+    return skip_file, excluded
+
+
+def _filter_apex_graph(result: dict, excluded_ids: set[str]) -> dict:
+    if not excluded_ids:
+        return result
+    nodes = [n for n in result.get("nodes", []) if n["id"] not in excluded_ids]
+    kept = {n["id"] for n in nodes}
+    edges = [
+        e
+        for e in result.get("edges", [])
+        if e.get("source") in kept and e.get("target") in kept
+    ]
+    result["nodes"] = nodes
+    result["edges"] = edges
+    return result
+
+
 def extract_apex(path: Path) -> dict:
-    """Extract Apex classes/triggers (tree-sitter-java + Apex-specific regex)."""
+    """Extract Apex classes/triggers (tree-sitter-java + Apex-specific regex).
+
+    Skips @isTest classes and @isTest / @TestSetup methods so test code does not
+    pollute the knowledge graph.
+    """
     from graphify.extract import extract_java
+
+    excluded: set[str] = set()
+    if path.suffix.lower() != ".trigger":
+        skip_file, excluded = _apex_collect_test_exclusions(path)
+        if skip_file:
+            return {"nodes": [], "edges": [], "input_tokens": 0, "output_tokens": 0}
 
     result = extract_java(path)
     if result.get("error"):
         return result
+
+    if excluded:
+        result = _filter_apex_graph(result, excluded)
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -490,6 +640,9 @@ def extract_apex(path: Path) -> dict:
         for match in _APEX_CLASS_RE.finditer(text):
             name = match.group(1)
             line = text[: match.start()].count("\n") + 1
+            prefix = text[max(0, match.start() - 800): match.start()]
+            if _apex_text_has_test_annotation(prefix):
+                continue
             if not any(n.get("label") == name for n in nodes):
                 nid = _make_id(stem, name)
                 add_node(nid, name, line)

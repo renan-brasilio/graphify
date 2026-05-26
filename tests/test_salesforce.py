@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from graphify.detect import CODE_EXTENSIONS, FileType, classify_file, detect
+from graphify.detect import CODE_EXTENSIONS, FileType, _is_noise_dir, classify_file, detect
 from graphify.extract import _get_extractor
 from graphify.salesforce import (
     SALESFORCE_CORE_CODE_EXTENSIONS,
@@ -40,6 +40,24 @@ def _edges(result: dict, **kwargs: str) -> list[dict]:
 
 def test_registry_data_loaded():
     assert len(SALESFORCE_REGISTRY_EXTENSIONS) > 400
+
+
+def test_sfdx_dir_is_skipped_during_detect():
+    assert _is_noise_dir(".sfdx")
+    root = SF_FIXTURES.parent.parent  # tests/fixtures/salesforce
+    sfdx_tools = root / ".sfdx" / "tools"
+    sfdx_tools.mkdir(parents=True, exist_ok=True)
+    noise_cls = sfdx_tools / "ScratchOrg.cls"
+    noise_cls.write_text("public class ScratchOrg {}", encoding="utf-8")
+    try:
+        result = detect(root)
+        code_files = result["files"]["code"]
+        assert not any(".sfdx" in p for p in code_files)
+    finally:
+        noise_cls.unlink(missing_ok=True)
+        for d in (sfdx_tools, sfdx_tools.parent):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
 
 
 def test_salesforce_code_extensions_include_core():
@@ -123,6 +141,23 @@ def test_extract_apex_class():
     result = extract_apex(SF_ROOT / "classes/AccountService.cls")
     assert "error" not in result
     assert any("AccountService" in label for label in _labels(result))
+
+
+def test_extract_apex_skips_test_class_and_methods():
+    result = extract_apex(SF_ROOT / "classes/AccountServiceTest.cls")
+    assert "error" not in result
+    assert result["nodes"] == []
+    assert result["edges"] == []
+    labels = _labels(result)
+    assert not any("AccountServiceTest" in label for label in labels)
+    assert not any("setupData" in label for label in labels)
+    assert not any("testRefresh" in label for label in labels)
+
+
+def test_extract_apex_keeps_production_when_test_class_present():
+    prod = extract_apex(SF_ROOT / "classes/AccountService.cls")
+    assert any("AccountService" in label for label in _labels(prod))
+    assert any(".refresh" in label or "refresh" in label.lower() for label in _labels(prod))
 
 
 def test_extract_apex_trigger_references_sobject():

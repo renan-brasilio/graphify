@@ -674,6 +674,7 @@ _SKIP_DIRS = {
     ".idea", ".cache", ".parcel-cache", ".svelte-kit", ".terraform", ".serverless",
     ".graphify",  # graphify's own extraction cache — never index self-generated data
     ".worktrees",  # git worktree convention (#947) — sibling checkouts, always redundant
+    ".sfdx",  # Salesforce CLI local org/types cache — not package source
 }
 
 # Large generated files that are never useful to extract
