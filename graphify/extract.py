@@ -11482,6 +11482,11 @@ _DISPATCH: dict[str, Any] = {
 
 def _get_extractor(path: Path) -> Any | None:
     """Return the correct extractor function for a file, or None if unsupported."""
+    from graphify.salesforce import salesforce_extractor_for
+
+    sf_extractor = salesforce_extractor_for(path)
+    if sf_extractor is not None:
+        return sf_extractor
     if path.name.endswith(".blade.php"):
         return extract_blade
     # MCP config files (.mcp.json, claude_desktop_config.json, ...) are routed

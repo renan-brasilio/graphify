@@ -1,0 +1,3 @@
+<aura:component controller="AccountService" extends="c:baseComponent" implements="flexipage:availableForAllPageTypes">
+    <aura:attribute name="title" type="String" default="Hello" />
+</aura:component>

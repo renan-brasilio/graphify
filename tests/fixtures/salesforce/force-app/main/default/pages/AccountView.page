@@ -1,0 +1,3 @@
+<apex:page controller="AccountService" extensions="AccountService">
+    <apex:outputText value="Account" />
+</apex:page>

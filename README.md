@@ -251,6 +251,32 @@ To remove graphify from all platforms at once: `graphify uninstall` (add `--purg
 
 Code is extracted locally with no API calls (AST via tree-sitter). Everything else goes through your AI assistant's model API.
 
+### Salesforce (SFDX)
+
+Graphify treats Salesforce DX and MDAPI trees as first-class corpora (`force-app/`, `unpackaged/`, `metadata/`, and typical package folders such as `classes/`, `objects/`, `lwc/`, `aura/`, `flows/`, etc.).
+
+| Kind | What is indexed | Local extraction (no LLM) |
+|------|-----------------|---------------------------|
+| **Apex** | `.cls`, `.trigger` | Classes, methods, imports (tree-sitter-java); trigger → SObject refs |
+| **Visualforce** | `.page`, `.component` | Page/component nodes; `controller` / `extensions` refs |
+| **Aura** | `.cmp`, `.app`, `.evt`, `.intf`, `.auradoc`, `.design` | Bundle nodes; controller, `extends`, `implements` |
+| **LWC** | `lwc/**` — `.js`, `.html`, `.css`, `.svg`, `*.js-meta.xml` | Bundle nodes; `c/` imports, `@salesforce/apex` & schema refs, `<c-*>` / `<lightning-*>` in templates; targets & objects in `js-meta.xml` |
+| **Decomposed metadata** | Any `*.{type}-meta.xml` (e.g. `.object-meta.xml`, `.field-meta.xml`, `.flow-meta.xml`, `.permissionset-meta.xml`) | Component node + XML reference edges (`object`, `apexClass`, `flow`, `field`, profiles, etc.) |
+| **Registry types** | 460+ MDAPI-style suffixes under SF paths (from the [Salesforce metadata registry](https://github.com/forcedotcom/source-deploy-retrieve)) | Same metadata XML extractor |
+| **Project config** | `sfdx-project.json`, `package.xml`, scratch-def / destructive-changes manifests | Indexed as docs where applicable |
+
+**Not indexed:** `.sfdx/` (local CLI cache and org tooling — add to `.gitignore`, not source).
+
+Point graphify at your package root (the folder that contains `force-app/` or `sfdx-project.json`):
+
+```bash
+graphify extract ./force-app
+# or the whole DX project:
+graphify extract .
+```
+
+Metadata XML extraction is **reference-oriented** (cross-links between types), not a full semantic model of every Salesforce metadata shape. Use semantic extraction for architecture and “why” questions on large orgs.
+
 Google Drive for desktop `.gdoc`, `.gsheet`, and `.gslides` files are shortcut
 pointers, not document content. To include native Google Docs, Sheets, and Slides
 in a headless extraction, install and authenticate the
