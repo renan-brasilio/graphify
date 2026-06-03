@@ -65,14 +65,17 @@ _SF_PROJECT_FILES: frozenset[str] = frozenset({
     "destructivechangespre.xml",
 })
 
-# XML element local-names that denote cross-metadata references
+# XML element local-names that denote cross-metadata references.
+# "label" and "fullname" are intentionally excluded: they describe the
+# component itself (display name / API name), not references to other
+# components.  Using them as reference targets produces spurious edges.
 _REFERENCE_TAGS: frozenset[str] = frozenset({
     "apexclass", "apexpage", "apexcomponent", "controller", "extension",
     "referenceto", "refto", "content", "customobject", "object", "objects",
     "flow", "flowname", "flowdefinition", "subflow", "field", "recordtype",
     "lightningcomponent", "lwccomponent", "page", "tab", "application",
     "profile", "permissionset", "permissionsets", "report", "dashboard",
-    "emailtemplate", "template", "label", "fullname", "targetobject",
+    "emailtemplate", "template", "targetobject",
     "sobjecttype", "sobject", "extends", "implements", "contentasset",
     "resource", "namedcredential", "connectedapp", "customtab", "flexipage",
     "recordtype", "compactlayout", "listview", "validationrule",
@@ -90,6 +93,105 @@ _REFERENCE_ATTRS: frozenset[str] = frozenset({
     "controller", "extension", "recordtype", "profile", "permissionset",
 })
 
+# Map from -meta.xml type suffix to a canonical sf_type string.
+_SF_META_TYPE_MAP: dict[str, str] = {
+    "flow": "flow",
+    "flowdefinition": "flow",
+    "object": "sobject",
+    "field": "sobject_field",
+    "permissionset": "permission_set",
+    "permissionsetgroup": "permission_set",
+    "profile": "profile",
+    "layout": "layout",
+    "flexipage": "flexipage",
+    "apexclass": "apex_class",
+    "apextrigger": "apex_trigger",
+    "auradefinitionbundle": "aura_bundle",
+    "lightningcomponentbundle": "lwc_bundle",
+    "page": "visualforce_page",
+    "component": "visualforce_component",
+    "workflow": "workflow",
+    "approvalprocess": "approval_process",
+    "customtab": "tab",
+    "compactlayout": "compact_layout",
+    "listview": "list_view",
+    "validationrule": "validation_rule",
+    "recordtype": "record_type",
+    "globalvalueset": "global_value_set",
+    "standardvalueset": "value_set",
+    "customlabels": "custom_labels",
+    "connectedapp": "connected_app",
+    "namedcredential": "named_credential",
+    "remotesitesetting": "remote_site",
+    "custommetadata": "custom_metadata",
+    "report": "report",
+    "dashboard": "dashboard",
+    "emailtemplate": "email_template",
+    "contentasset": "content_asset",
+    "staticresource": "static_resource",
+}
+
+# Map from a _REFERENCE_TAGS key to the sf_type of its reference targets.
+_TAG_TO_SF_TYPE: dict[str, str] = {
+    "apexclass": "apex_class",
+    "apexpage": "visualforce_page",
+    "apexcomponent": "visualforce_component",
+    "controller": "apex_class",
+    "extension": "apex_class",
+    "referenceto": "sobject",
+    "customobject": "sobject",
+    "object": "sobject",
+    "objects": "sobject",
+    "targetobject": "sobject",
+    "sobjecttype": "sobject",
+    "sobject": "sobject",
+    "flow": "flow",
+    "flowname": "flow",
+    "flowdefinition": "flow",
+    "subflow": "flow",
+    "permissionset": "permission_set",
+    "permissionsets": "permission_set",
+    "profile": "profile",
+    "lightningcomponent": "lwc_bundle",
+    "lwccomponent": "lwc_bundle",
+    "namedcredential": "named_credential",
+    "connectedapp": "connected_app",
+    "contentasset": "content_asset",
+    "custommetadata": "custom_metadata",
+    "globalvalueset": "global_value_set",
+    "report": "report",
+    "dashboard": "dashboard",
+    "emailtemplate": "email_template",
+    "flexipage": "flexipage",
+}
+
+
+def _sf_type_from_path(path: Path) -> str:
+    """Infer the Salesforce component type from a file path."""
+    ext = path.suffix.lower()
+    if ext == ".cls":
+        return "apex_class"
+    if ext == ".trigger":
+        return "apex_trigger"
+    if ext == ".page":
+        return "visualforce_page"
+    if ext == ".component":
+        return "visualforce_component"
+    if ext in (".cmp", ".app", ".evt", ".intf", ".auradoc", ".design"):
+        return "aura_bundle"
+    name = path.name.lower()
+    if name.endswith("-meta.xml"):
+        base = name[: -len("-meta.xml")]
+        if "." in base:
+            metatype = base.rsplit(".", 1)[1]
+            return _SF_META_TYPE_MAP.get(metatype, metatype)
+    if _in_lwc(path):
+        return "lwc_bundle"
+    if "aura" in {p.lower() for p in path.parts}:
+        return "aura_bundle"
+    return "metadata"
+
+
 _APEX_CLASS_RE = re.compile(
     r"^\s*(?:global|public|private|protected|virtual|abstract|with\s+sharing|"
     r"without\s+sharing|inherited\s+sharing)?\s*"
@@ -97,7 +199,7 @@ _APEX_CLASS_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _APEX_TRIGGER_RE = re.compile(
-    r"^\s*trigger\s+(\w+)\s+on\s+(\w+)",
+    r"^\s*trigger\s+(\w+)\s+on\s+(\w+)\s*\(([^)]+)\)",
     re.IGNORECASE | re.MULTILINE,
 )
 _VF_CONTROLLER_RE = re.compile(
@@ -269,6 +371,7 @@ def _add_reference(
     tag: str,
     add_node: Callable[..., None],
     add_edge: Callable[..., None],
+    ref_sf_type: str | None = None,
 ) -> None:
     for part in re.split(r"[,;]\s*", val):
         part = part.strip()
@@ -276,7 +379,7 @@ def _add_reference(
             continue
         label = part.split(".")[-1]
         ref_nid = _make_id(label)
-        add_node(ref_nid, part, line)
+        add_node(ref_nid, part, line, ref_sf_type)
         add_edge(comp_nid, ref_nid, "references", line, context=tag)
 
 
@@ -287,21 +390,25 @@ def extract_salesforce_metadata(path: Path) -> dict:
     label = _metadata_component_label(path)
     file_nid = _make_id(str_path)
     comp_nid = _make_id(stem, label)
+    sf_type = _sf_type_from_path(path)
 
     nodes: list[dict] = []
     edges: list[dict] = []
     seen: set[str] = set()
 
-    def add_node(nid: str, node_label: str, line: int = 1) -> None:
+    def add_node(nid: str, node_label: str, line: int = 1, node_sf_type: str | None = None) -> None:
         if nid not in seen:
             seen.add(nid)
-            nodes.append({
+            entry: dict[str, Any] = {
                 "id": nid,
                 "label": node_label,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
-            })
+            }
+            if node_sf_type:
+                entry["sf_type"] = node_sf_type
+            nodes.append(entry)
 
     def add_edge(
         src: str,
@@ -324,8 +431,8 @@ def extract_salesforce_metadata(path: Path) -> dict:
             edge["context"] = context
         edges.append(edge)
 
-    add_node(file_nid, path.name)
-    add_node(comp_nid, label)
+    add_node(file_nid, path.name, node_sf_type=sf_type)
+    add_node(comp_nid, label, node_sf_type=sf_type)
     add_edge(file_nid, comp_nid, "contains")
 
     try:
@@ -333,6 +440,35 @@ def extract_salesforce_metadata(path: Path) -> dict:
         root = ET.fromstring(text)
     except Exception as exc:
         return {"nodes": nodes, "edges": edges, "error": str(exc)}
+
+    # First pass: pick up display label (<label>) and flow sub-type
+    # (<processType>) so we can annotate the component node before the main
+    # reference-extraction loop.
+    display_label: str | None = None
+    process_type: str | None = None
+    for elem in root.iter():
+        etag = _local_tag(elem.tag).lower()
+        if etag == "label" and display_label is None:
+            val = (elem.text or "").strip()
+            if val:
+                display_label = val
+        elif etag == "processtype" and process_type is None:
+            val = (elem.text or "").strip()
+            if val:
+                process_type = val
+        if display_label and process_type:
+            break
+
+    # Update the component node: use the XML display label when available
+    # (e.g. "Account Update" instead of the filename-derived "flow"), and
+    # store processType as sf_subtype for flows.
+    for node in nodes:
+        if node["id"] == comp_nid:
+            if display_label:
+                node["label"] = display_label
+            if process_type:
+                node["sf_subtype"] = process_type
+            break
 
     # Flow actionCalls may list actionName before or after actionType
     pending_action_name: str | None = None
@@ -352,6 +488,7 @@ def extract_salesforce_metadata(path: Path) -> dict:
                     tag="apexclass",
                     add_node=add_node,
                     add_edge=add_edge,
+                    ref_sf_type="apex_class",
                 )
                 pending_action_name = None
                 pending_apex_action = False
@@ -369,6 +506,7 @@ def extract_salesforce_metadata(path: Path) -> dict:
                     tag="apexclass",
                     add_node=add_node,
                     add_edge=add_edge,
+                    ref_sf_type="apex_class",
                 )
                 pending_action_name = None
                 pending_apex_action = False
@@ -393,13 +531,11 @@ def extract_salesforce_metadata(path: Path) -> dict:
                     tag=attr_local,
                     add_node=add_node,
                     add_edge=add_edge,
+                    ref_sf_type=_TAG_TO_SF_TYPE.get(attr_local),
                 )
 
-        if tag in ("fullname", "apiname") and (elem.text or "").strip():
-            text_val = (elem.text or "").strip()
-            ref_nid = _make_id(text_val)
-            add_node(ref_nid, text_val, line)
-            add_edge(comp_nid, ref_nid, "references", line, context=tag)
+        # <fullname> and <apiname> identify the component itself — skip them
+        # as reference targets to avoid self-referential noise edges.
 
         if tag in _REFERENCE_TAGS:
             val = (elem.text or elem.get("value") or elem.get("name") or "").strip()
@@ -418,6 +554,7 @@ def extract_salesforce_metadata(path: Path) -> dict:
                     tag=tag,
                     add_node=add_node,
                     add_edge=add_edge,
+                    ref_sf_type=_TAG_TO_SF_TYPE.get(tag),
                 )
 
     return {"nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0}
@@ -430,10 +567,13 @@ def extract_lwc_js_meta(path: Path) -> dict:
         return result
 
     bundle = lwc_bundle_name(path)
+    stem = _file_stem(path)
+    comp_label = _metadata_component_label(path)
+    comp_nid = _make_id(stem, comp_label)
     for node in result.get("nodes", []):
-        label = node.get("label", "")
-        if label in (bundle, path.name, _metadata_component_label(path)):
+        if node["id"] == comp_nid:
             node["label"] = f"{bundle} (LWC)"
+            node["sf_type"] = "lwc_bundle"
             break
 
     return result
@@ -601,16 +741,19 @@ def extract_apex(path: Path) -> dict:
     edges = list(result.get("edges", []))
     seen = {n["id"] for n in nodes}
 
-    def add_node(nid: str, node_label: str, line: int) -> None:
+    def add_node(nid: str, node_label: str, line: int, sf_type: str | None = None) -> None:
         if nid not in seen:
             seen.add(nid)
-            nodes.append({
+            entry: dict[str, Any] = {
                 "id": nid,
                 "label": node_label,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
-            })
+            }
+            if sf_type:
+                entry["sf_type"] = sf_type
+            nodes.append(entry)
 
     def add_edge(src: str, tgt: str, relation: str, line: int, *, context: str | None = None) -> None:
         edge: dict[str, Any] = {
@@ -629,13 +772,18 @@ def extract_apex(path: Path) -> dict:
     if path.suffix.lower() == ".trigger":
         for match in _APEX_TRIGGER_RE.finditer(text):
             trig_name, sobject = match.group(1), match.group(2)
+            events_raw = match.group(3)
+            events = [e.strip() for e in events_raw.split(",") if e.strip()]
+            events_str = ", ".join(events)
             line = text[: match.start()].count("\n") + 1
             trig_nid = _make_id(stem, trig_name)
-            add_node(trig_nid, f"trigger {trig_name}", line)
+            add_node(trig_nid, f"trigger {trig_name} on {sobject} ({events_str})", line, "apex_trigger")
             add_edge(file_nid, trig_nid, "contains", line)
             obj_nid = _make_id(sobject)
-            add_node(obj_nid, sobject, line)
+            add_node(obj_nid, sobject, line, "sobject")
             add_edge(trig_nid, obj_nid, "references", line, context="sobject")
+            for event in events:
+                add_edge(trig_nid, obj_nid, "fires_on", line, context=event.replace(" ", "_"))
     else:
         for match in _APEX_CLASS_RE.finditer(text):
             name = match.group(1)
@@ -645,7 +793,7 @@ def extract_apex(path: Path) -> dict:
                 continue
             if not any(n.get("label") == name for n in nodes):
                 nid = _make_id(stem, name)
-                add_node(nid, name, line)
+                add_node(nid, name, line, "apex_class")
                 add_edge(file_nid, nid, "contains", line)
 
     result["nodes"] = nodes
@@ -664,20 +812,24 @@ def extract_visualforce(path: Path) -> dict:
     stem = _file_stem(path)
     file_nid = _make_id(str_path)
     page_nid = _make_id(stem, path.stem)
+    page_sf_type = _sf_type_from_path(path)
     nodes: list[dict] = []
     edges: list[dict] = []
     seen: set[str] = set()
 
-    def add_node(nid: str, node_label: str, line: int = 1) -> None:
+    def add_node(nid: str, node_label: str, line: int = 1, sf_type: str | None = None) -> None:
         if nid not in seen:
             seen.add(nid)
-            nodes.append({
+            entry: dict[str, Any] = {
                 "id": nid,
                 "label": node_label,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
-            })
+            }
+            if sf_type:
+                entry["sf_type"] = sf_type
+            nodes.append(entry)
 
     def add_edge(
         src: str,
@@ -700,15 +852,15 @@ def extract_visualforce(path: Path) -> dict:
             edge["context"] = context
         edges.append(edge)
 
-    add_node(file_nid, path.name)
-    add_node(page_nid, path.stem)
+    add_node(file_nid, path.name, sf_type=page_sf_type)
+    add_node(page_nid, path.stem, sf_type=page_sf_type)
     add_edge(file_nid, page_nid, "contains")
 
     for match in _VF_CONTROLLER_RE.finditer(text):
         ctrl = match.group(1).split(".")[-1]
         line = text[: match.start()].count("\n") + 1
         ctrl_nid = _make_id(ctrl)
-        add_node(ctrl_nid, ctrl, line)
+        add_node(ctrl_nid, ctrl, line, "apex_class")
         add_edge(page_nid, ctrl_nid, "references", line, context="controller")
 
     for match in _VF_EXTENSIONS_RE.finditer(text):
@@ -717,7 +869,7 @@ def extract_visualforce(path: Path) -> dict:
             ext = ext.strip()
             if ext:
                 ext_nid = _make_id(ext.split(".")[-1])
-                add_node(ext_nid, ext, line)
+                add_node(ext_nid, ext, line, "apex_class")
                 add_edge(page_nid, ext_nid, "references", line, context="extension")
 
     return {"nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0}
@@ -738,16 +890,19 @@ def extract_aura(path: Path) -> dict:
     edges: list[dict] = []
     seen: set[str] = set()
 
-    def add_node(nid: str, node_label: str, line: int = 1) -> None:
+    def add_node(nid: str, node_label: str, line: int = 1, sf_type: str | None = None) -> None:
         if nid not in seen:
             seen.add(nid)
-            nodes.append({
+            entry: dict[str, Any] = {
                 "id": nid,
                 "label": node_label,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
-            })
+            }
+            if sf_type:
+                entry["sf_type"] = sf_type
+            nodes.append(entry)
 
     def add_edge(
         src: str,
@@ -770,22 +925,22 @@ def extract_aura(path: Path) -> dict:
             edge["context"] = context
         edges.append(edge)
 
-    add_node(file_nid, path.name)
-    add_node(bundle_nid, path.stem)
+    add_node(file_nid, path.name, sf_type="aura_bundle")
+    add_node(bundle_nid, path.stem, sf_type="aura_bundle")
     add_edge(file_nid, bundle_nid, "contains")
 
     for match in _AURA_CONTROLLER_RE.finditer(text):
         ctrl = match.group(1).split(".")[-1]
         line = text[: match.start()].count("\n") + 1
         ctrl_nid = _make_id(ctrl)
-        add_node(ctrl_nid, ctrl, line)
+        add_node(ctrl_nid, ctrl, line, "apex_class")
         add_edge(bundle_nid, ctrl_nid, "references", line, context="controller")
 
     for match in _AURA_EXTENDS_RE.finditer(text):
         parent = match.group(2)
         line = text[: match.start()].count("\n") + 1
         parent_nid = _make_id(parent)
-        add_node(parent_nid, parent, line)
+        add_node(parent_nid, parent, line, "aura_bundle")
         add_edge(bundle_nid, parent_nid, "references", line, context="extends")
 
     for match in _AURA_IMPLEMENTS_RE.finditer(text):
@@ -816,16 +971,19 @@ def extract_lwc_bundle_file(path: Path) -> dict:
     edges: list[dict] = []
     seen: set[str] = set()
 
-    def add_node(nid: str, node_label: str, line: int = 1) -> None:
+    def add_node(nid: str, node_label: str, line: int = 1, sf_type: str | None = None) -> None:
         if nid not in seen:
             seen.add(nid)
-            nodes.append({
+            entry: dict[str, Any] = {
                 "id": nid,
                 "label": node_label,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
-            })
+            }
+            if sf_type:
+                entry["sf_type"] = sf_type
+            nodes.append(entry)
 
     def add_edge(
         src: str,
@@ -848,8 +1006,8 @@ def extract_lwc_bundle_file(path: Path) -> dict:
             edge["context"] = context
         edges.append(edge)
 
-    add_node(file_nid, path.name)
-    add_node(bundle_nid, bundle_name)
+    add_node(file_nid, path.name, sf_type="lwc_bundle")
+    add_node(bundle_nid, bundle_name, sf_type="lwc_bundle")
     add_edge(file_nid, bundle_nid, "contains")
 
     ext = path.suffix.lower()
@@ -861,35 +1019,37 @@ def extract_lwc_bundle_file(path: Path) -> dict:
             if spec.startswith("c/"):
                 child = _lwc_child_bundle_name(spec.split("/", 1)[1])
                 tgt_nid = _make_id(child)
-                add_node(tgt_nid, child, line)
+                add_node(tgt_nid, child, line, "lwc_bundle")
                 add_edge(bundle_nid, tgt_nid, "imports", line, context="lwc")
             elif spec.startswith("@"):
                 apex = _LWC_APEX_IMPORT_RE.search(spec)
                 if apex:
                     cls_name = apex.group(1)
+                    method_name = apex.group(2)
                     cls_nid = _make_id(cls_name)
-                    add_node(cls_nid, cls_name, line)
+                    add_node(cls_nid, cls_name, line, "apex_class")
                     add_edge(bundle_nid, cls_nid, "references", line, context="apexclass")
+                    # Also emit a method-level reference so the specific
+                    # entry point is represented in the graph.
+                    method_ref = f"{cls_name}.{method_name}"
+                    method_nid = _make_id(cls_name, method_name)
+                    add_node(method_nid, method_ref, line, "apex_method")
+                    add_edge(bundle_nid, method_nid, "references", line, context="apexmethod")
                 schema = _LWC_SCHEMA_IMPORT_RE.search(spec)
                 if schema:
                     obj_name = schema.group(1)
                     obj_nid = _make_id(obj_name)
-                    add_node(obj_nid, obj_name, line)
+                    add_node(obj_nid, obj_name, line, "sobject")
                     add_edge(bundle_nid, obj_nid, "references", line, context="object")
-
-        for match in _LWC_APEX_IMPORT_RE.finditer(text):
-            line = text[: match.start()].count("\n") + 1
-            cls_name = match.group(1)
-            cls_nid = _make_id(cls_name)
-            add_node(cls_nid, cls_name, line)
-            add_edge(bundle_nid, cls_nid, "references", line, context="apexclass")
+        # Note: _LWC_APEX_IMPORT_RE.finditer pass removed — already handled
+        # inside the _LWC_IMPORT_RE loop above, which avoids duplicate edges.
 
     elif ext == ".html":
         for match in _LWC_C_TAG_RE.finditer(text):
             line = text[: match.start()].count("\n") + 1
             child = _lwc_child_bundle_name(match.group(1))
             tgt_nid = _make_id(child)
-            add_node(tgt_nid, child, line)
+            add_node(tgt_nid, child, line, "lwc_bundle")
             add_edge(bundle_nid, tgt_nid, "references", line, context="lwc")
 
         for match in _LWC_LIGHTNING_TAG_RE.finditer(text):

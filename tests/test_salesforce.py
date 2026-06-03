@@ -230,3 +230,136 @@ def test_extract_lwc_js_meta_objects_and_label():
 def test_extract_lwc_sibling_bundle():
     result = extract_lwc_bundle_file(SF_ROOT / "lwc/utils/utils.js")
     assert any("utils" in label for label in _labels(result))
+
+
+def _sf_types(result: dict) -> dict[str, str]:
+    """Return {node_label: sf_type} for nodes that carry an sf_type."""
+    return {n["label"]: n["sf_type"] for n in result["nodes"] if "sf_type" in n}
+
+
+# ── sf_type on nodes ──────────────────────────────────────────────────────────
+
+def test_sf_type_on_flow_nodes():
+    result = extract_salesforce_metadata(SF_ROOT / "flows/Account_Update.flow-meta.xml")
+    types = _sf_types(result)
+    assert any(t == "flow" for t in types.values())
+
+
+def test_sf_type_on_sobject_nodes():
+    result = extract_salesforce_metadata(SF_ROOT / "objects/Account/Account.object-meta.xml")
+    types = _sf_types(result)
+    assert any(t == "sobject" for t in types.values())
+
+
+def test_sf_type_on_apex_references_from_flow():
+    result = extract_salesforce_metadata(SF_ROOT / "flows/Account_Update.flow-meta.xml")
+    apex_nodes = [n for n in result["nodes"] if n.get("sf_type") == "apex_class"]
+    assert apex_nodes, "expected at least one apex_class reference node"
+
+
+def test_sf_type_on_lwc_bundle():
+    result = extract_lwc_bundle_file(LWC_CARD / "accountCard.js")
+    types = _sf_types(result)
+    assert any(t == "lwc_bundle" for t in types.values())
+
+
+def test_sf_type_on_aura_bundle():
+    result = extract_aura(SF_ROOT / "aura/HelloWorld/HelloWorld.cmp")
+    types = _sf_types(result)
+    assert any(t == "aura_bundle" for t in types.values())
+
+
+def test_sf_type_on_visualforce_page():
+    result = extract_visualforce(SF_ROOT / "pages/AccountView.page")
+    types = _sf_types(result)
+    assert any(t == "visualforce_page" for t in types.values())
+
+
+# ── trigger event capture ─────────────────────────────────────────────────────
+
+def test_trigger_label_includes_event():
+    result = extract_apex(SF_ROOT / "triggers/AccountTrigger.trigger")
+    trig_labels = [n["label"] for n in result["nodes"] if "AccountTrigger" in n["label"]]
+    assert trig_labels, "trigger node not found"
+    assert any("before insert" in lbl.lower() for lbl in trig_labels)
+
+
+def test_trigger_fires_on_edges():
+    result = extract_apex(SF_ROOT / "triggers/AccountTrigger.trigger")
+    fires_on = _edges(result, relation="fires_on")
+    assert fires_on, "expected fires_on edges from trigger"
+
+
+def test_trigger_sf_type():
+    result = extract_apex(SF_ROOT / "triggers/AccountTrigger.trigger")
+    # Match only the trigger component node (label starts with "trigger "),
+    # not the filename node (label ends with ".trigger").
+    trig_nodes = [
+        n for n in result["nodes"]
+        if n.get("label", "").lower().startswith("trigger accounttrigger")
+    ]
+    assert trig_nodes
+    assert all(n.get("sf_type") == "apex_trigger" for n in trig_nodes)
+
+
+# ── display label from XML ────────────────────────────────────────────────────
+
+def test_flow_uses_xml_label_as_node_label():
+    result = extract_salesforce_metadata(SF_ROOT / "flows/Account_Update.flow-meta.xml")
+    assert any("Account Update" in label for label in _labels(result)), (
+        "expected flow comp node to use XML <label> as display name"
+    )
+
+
+def test_flow_stores_process_type():
+    result = extract_salesforce_metadata(SF_ROOT / "flows/Account_Update.flow-meta.xml")
+    flow_nodes = [n for n in result["nodes"] if n.get("sf_type") == "flow"]
+    assert flow_nodes
+    assert any(n.get("sf_subtype") == "AutoLaunchedFlow" for n in flow_nodes)
+
+
+def test_metadata_field_uses_xml_label():
+    result = extract_salesforce_metadata(
+        SF_ROOT / "objects/Account/fields/Industry.field-meta.xml"
+    )
+    labels = _labels(result)
+    assert any(label == "Industry" for label in labels), (
+        "expected comp node label to be 'Industry' from XML <label>"
+    )
+
+
+# ── no spurious self-reference edges ─────────────────────────────────────────
+
+def test_flow_no_self_label_reference():
+    result = extract_salesforce_metadata(SF_ROOT / "flows/Account_Update.flow-meta.xml")
+    refs = _edges(result, relation="references", context="label")
+    assert not refs, "label elements should not produce reference edges"
+
+
+def test_object_no_fullname_reference():
+    result = extract_salesforce_metadata(
+        SF_ROOT / "objects/Account/fields/Industry.field-meta.xml"
+    )
+    fullname_refs = [e for e in result["edges"] if e.get("context") == "fullname"]
+    assert not fullname_refs, "fullname elements should not produce reference edges"
+
+
+# ── LWC Apex method-level import ──────────────────────────────────────────────
+
+def test_lwc_apex_import_emits_method_reference():
+    result = extract_lwc_bundle_file(LWC_CARD / "accountCard.js")
+    method_edges = _edges(result, context="apexmethod")
+    assert method_edges, "expected apexmethod reference edge"
+    method_labels = [n["label"] for n in result["nodes"] if n.get("sf_type") == "apex_method"]
+    assert any("refresh" in lbl for lbl in method_labels), (
+        "expected method node label to contain 'refresh'"
+    )
+
+
+def test_lwc_apex_import_no_duplicate_edges():
+    result = extract_lwc_bundle_file(LWC_CARD / "accountCard.js")
+    apex_class_edges = _edges(result, context="apexclass")
+    sources_targets = [(e["source"], e["target"]) for e in apex_class_edges]
+    assert len(sources_targets) == len(set(sources_targets)), (
+        "duplicate apexclass reference edges found"
+    )
