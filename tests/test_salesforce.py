@@ -520,6 +520,25 @@ def test_cross_file_references_land_on_definition_nodes():
     assert "sf_sobject_account" in {e["target"] for e in apex["edges"]}
 
 
+def test_boolean_flag_values_not_treated_as_references(tmp_path: Path):
+    """A tab's <customObject>true</customObject> is a config flag, not an
+    sobject reference."""
+    root = tmp_path / "force-app" / "main" / "default" / "tabs"
+    root.mkdir(parents=True)
+    tab = root / "My_Object__c.tab-meta.xml"
+    tab.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<CustomTab xmlns="http://soap.sforce.com/2006/04/metadata">\n'
+        "    <customObject>true</customObject>\n"
+        "    <motif>Custom53: Bell</motif>\n"
+        "</CustomTab>\n",
+        encoding="utf-8",
+    )
+    result = extract_salesforce_metadata(tab)
+    assert "true" not in _labels(result)
+    assert "false" not in _labels(result)
+
+
 def test_pipeline_does_not_split_global_ids(tmp_path: Path):
     """The extraction pipeline's collision-disambiguation pass must respect
     id_scope=global: one canonical node per component across the whole corpus,

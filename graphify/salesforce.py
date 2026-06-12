@@ -507,6 +507,10 @@ def _add_reference(
         part = part.strip()
         if not part or part in (".", "-"):
             continue
+        # Boolean/numeric element text is a config flag (e.g. a tab's
+        # <customObject>true</customObject>), not a component reference.
+        if part.casefold() in ("true", "false") or part.isdigit():
+            continue
         if part.casefold().startswith(_PLATFORM_REF_PREFIXES):
             continue
         # Strip the c: / namespace qualifier; keep dotted names intact for
