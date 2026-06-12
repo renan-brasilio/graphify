@@ -7002,6 +7002,12 @@ def _disambiguate_colliding_node_ids(
     remap: dict[tuple[str, str], str] = {}
     ambiguous_ids: set[str] = set()
     for old_id, group in by_id.items():
+        # Extractors whose namespace guarantees org/project-unique names (e.g.
+        # Salesforce component names per metadata type) stamp id_scope=global:
+        # the same ID appearing from several files is an intentional cross-file
+        # reference that must converge on one node, not a collision to split.
+        if any(node.get("id_scope") == "global" for node in group):
+            continue
         source_keys = {_source_key(str(node.get("source_file", "")), root) for node in group}
         if len(group) < 2 or len(source_keys) < 2:
             continue

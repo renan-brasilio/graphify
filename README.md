@@ -253,19 +253,21 @@ Code is extracted locally with no API calls (AST via tree-sitter). Everything el
 
 ### Salesforce (SFDX)
 
-Graphify treats Salesforce DX and MDAPI trees as first-class corpora (`force-app/`, `unpackaged/`, `metadata/`, and typical package folders such as `classes/`, `objects/`, `lwc/`, `aura/`, `flows/`, etc.).
+Graphify treats Salesforce DX and MDAPI trees as first-class corpora. Salesforce routing activates only inside a real project — a `force-app/` or `unpackaged/` path, or an `sfdx-project.json` ancestor — so non-Salesforce repos with `pages/` or `components/` directories are never affected.
+
+Component names are org-unique per metadata type, so every extractor builds node IDs from `{type}:{Name}`. A Flow's `actionName`, a Visualforce `controller=`, an LWC `@salesforce/apex` import, and a trigger body call all land on the **same node** as the Apex class definition — the cross-component architecture connects without any resolution pass.
 
 | Kind | What is indexed | Local extraction (no LLM) |
 |------|-----------------|---------------------------|
-| **Apex** | `.cls`, `.trigger` | Classes, methods, imports (tree-sitter-java); trigger → SObject refs |
+| **Apex** | `.cls`, `.trigger` | Classes, interfaces, enums, methods (regex; no tree-sitter dependency); `extends`/`implements`; cross-class static calls; constructor refs; SOQL → SObject `queries` edges; trigger → SObject `fires_on` edges. `@isTest` classes and `@isTest`/`@TestSetup` methods are excluded. Platform builtins (`String`, `List`, `System`, `Database`, …) never become nodes |
 | **Visualforce** | `.page`, `.component` | Page/component nodes; `controller` / `extensions` refs |
-| **Aura** | `.cmp`, `.app`, `.evt`, `.intf`, `.auradoc`, `.design` | Bundle nodes; controller, `extends`, `implements` |
-| **LWC** | `lwc/**` — `.js`, `.html`, `.css`, `.svg`, `*.js-meta.xml` | Bundle nodes; `c/` imports, `@salesforce/apex` & schema refs, `<c-*>` / `<lightning-*>` in templates; targets & objects in `js-meta.xml` |
-| **Decomposed metadata** | Any `*.{type}-meta.xml` (e.g. `.object-meta.xml`, `.field-meta.xml`, `.flow-meta.xml`, `.permissionset-meta.xml`) | Component node + XML reference edges (`object`, `apexClass`, `flow`, `field`, profiles, etc.) |
+| **Aura** | `.cmp`, `.app`, `.evt`, `.intf`, `.auradoc`, `.design` | Bundle nodes; controller, `extends`, custom `implements` (platform markers like `flexipage:*` skipped) |
+| **LWC** | `lwc/**` — `.js`, `.html`, `.css`, `.svg`, `*.js-meta.xml` | One bundle node shared by all files of a bundle; `c/` imports, `@salesforce/apex` class + method refs, `@salesforce/schema` object + field refs, `<c-*>` in templates; objects in `js-meta.xml` (`<lightning-*>` base components and `lightning__*` targets skipped) |
+| **Decomposed metadata** | `*.{type}-meta.xml` (e.g. `.object-meta.xml`, `.field-meta.xml`, `.flow-meta.xml`) | Component node + typed XML reference edges; object fields qualified as `Account.Industry` and linked to their object |
 | **Registry types** | 460+ MDAPI-style suffixes under SF paths (from the [Salesforce metadata registry](https://github.com/forcedotcom/source-deploy-retrieve)) | Same metadata XML extractor |
 | **Project config** | `sfdx-project.json`, `package.xml`, scratch-def / destructive-changes manifests | Indexed as docs where applicable |
 
-**Not indexed:** `.sfdx/` (local CLI cache and org tooling — add to `.gitignore`, not source).
+**Not indexed:** `.sfdx/` (local CLI cache); code sidecars (`*.cls-meta.xml` etc. — no information beyond the code file); **profiles, permission sets, and layouts** — they are permission/arrangement matrices that reference thousands of components each and drown the architecture in noise.
 
 Point graphify at your package root (the folder that contains `force-app/` or `sfdx-project.json`):
 
